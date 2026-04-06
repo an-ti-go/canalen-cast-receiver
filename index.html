@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Canalen</title>
+  <!--
+    Cast Application Framework v3 (Web Receiver SDK).
+    Must be loaded before any cast.framework usage.
+  -->
+  <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <!--
+    hls.js — JavaScript HLS player for browsers that don't support native HLS.
+    The Chromecast's Chrome does not support native HLS, so hls.js is required
+    to play live streams and catch-up (.m3u8) from the IPTV server.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
+    #player { width: 100%; height: 100%; object-fit: contain; }
+  </style>
+</head>
+<body>
+  <video id="player" autoplay playsinline></video>
+
+  <script>
+    'use strict';
+
+    const video  = document.getElementById('player');
+    const context = cast.framework.CastReceiverContext.getInstance();
+    const playerManager = context.getPlayerManager();
+
+    // Tell CAF to use our <video> element so that it can still handle
+    // PLAY/PAUSE/SEEK commands and report media status back to the sender.
+    playerManager.setMediaElement(video);
+
+    let hls = null;
+
+    function isHlsUrl(url, contentType) {
+      if (!url) return false;
+      if (/\.m3u8(\?|$)/i.test(url)) return true;
+      const ct = (contentType || '').toLowerCase();
+      return ct === 'application/x-mpegurl' || ct === 'application/vnd.apple.mpegurl';
+    }
+
+    function teardownHls() {
+      if (hls) {
+        hls.destroy();
+        hls = null;
+      }
+    }
+
+    function loadMedia(url, contentType) {
+      teardownHls();
+      video.src = '';
+      video.load();
+
+      if (isHlsUrl(url, contentType) && Hls.isSupported()) {
+        hls = new Hls({
+          enableWorker: false,   // workers are blocked in some receiver environments
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 10,
+        });
+        hls.on(Hls.Events.ERROR, function (event, data) {
+          if (data.fatal) {
+            console.error('[hls.js] fatal error', data.type, data.details);
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                hls.recoverMediaError();
+                break;
+              default:
+                teardownHls();
+                break;
+            }
+          }
+        });
+        hls.loadSource(url);
+        hls.attachMedia(video);
+      } else {
+        // Native playback: MP4, MKV (on Chromecast Ultra/4K), TS, etc.
+        video.src = url;
+      }
+
+      video.play().catch(err => console.warn('[player] autoplay blocked:', err));
+    }
+
+    // Intercept LOAD requests from the sender app.
+    // We extract the URL, drive playback ourselves, and return the request
+    // so CAF can track media status.
+    playerManager.setMessageInterceptor(
+      cast.framework.messages.MessageType.LOAD,
+      request => {
+        const media = request.media;
+        const url   = media.contentUrl || media.contentId;
+        console.log('[receiver] LOAD url=' + url + ' contentType=' + media.contentType);
+        loadMedia(url, media.contentType);
+        return request;
+      }
+    );
+
+    context.start({ touchScreenOptimizedApp: false });
+  </script>
+</body>
+</html>
