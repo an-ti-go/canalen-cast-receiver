@@ -195,7 +195,9 @@
     video.addEventListener('waiting',  () => showBuffering('Buffering…'));
     video.addEventListener('playing',  () => { hideBuffering(); hideError(); });
     video.addEventListener('stalled',  () => showBuffering('Reconnecting…'));
-    video.addEventListener('error',    () => {
+    video.addEventListener('error', () => {
+      // Ignore errors fired during reset (video.src = '' triggers MEDIA_ERR_SRC_NOT_SUPPORTED)
+      if (!video.currentSrc) return;
       const code = video.error ? video.error.code : '?';
       showError('Video error (code ' + code + '). Try playing again from your phone.');
     });
