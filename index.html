@@ -75,6 +75,27 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     #buffering-label { font-size: 16px; color: rgba(255,255,255,0.7); }
 
+    /* ── Subtitle overlay ───────────────────────────────────────── */
+    #subtitle-overlay {
+      position: fixed;
+      bottom: 80px; left: 0; right: 0;
+      text-align: center;
+      pointer-events: none;
+      padding: 0 80px;
+    }
+    #subtitle-text-box {
+      display: inline-block;
+      background: rgba(0,0,0,0.75);
+      color: #fff;
+      font-size: 32px;
+      line-height: 1.4;
+      padding: 6px 16px;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      max-width: 100%;
+      visibility: hidden;
+    }
+
     /* ── Error overlay ───────────────────────────────────────────── */
     #error-overlay {
       position: fixed;
@@ -108,6 +129,11 @@
       <div id="subtitle-text"></div>
       <div id="live-badge">LIVE</div>
     </div>
+  </div>
+
+  <!-- Subtitles -->
+  <div id="subtitle-overlay">
+    <span id="subtitle-text-box"></span>
   </div>
 
   <!-- Buffering -->
@@ -287,6 +313,88 @@
         return request;
       }
     );
+
+    // ── Subtitle support ──────────────────────────────────────────
+
+    const SUBTITLE_NAMESPACE = 'urn:x-cast:com.canalen.subtitles';
+    const subtitleBox = document.getElementById('subtitle-text-box');
+
+    let subtitleCues = []; // [{start, end, text}] in seconds
+
+    function parseSrt(text) {
+      const cues = [];
+      // Normalize line endings
+      const blocks = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split(/\n{2,}/);
+      const timeRe = /(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})/;
+      for (const block of blocks) {
+        const lines = block.trim().split('\n');
+        if (lines.length < 2) continue;
+        // Skip numeric index line if present
+        const startLine = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
+        const match = lines[startLine]?.match(timeRe);
+        if (!match) continue;
+        const toSec = (h, m, s, ms) => +h * 3600 + +m * 60 + +s + +ms / 1000;
+        const start = toSec(match[1], match[2], match[3], match[4]);
+        const end   = toSec(match[5], match[6], match[7], match[8]);
+        const text  = lines.slice(startLine + 1).join('\n').replace(/<[^>]+>/g, '').trim();
+        if (text) cues.push({ start, end, text });
+      }
+      return cues;
+    }
+
+    function parseVtt(text) {
+      // Strip WEBVTT header and use same time regex as SRT
+      const stripped = text.replace(/^WEBVTT[^\n]*\n/, '');
+      return parseSrt(stripped);
+    }
+
+    function updateSubtitles() {
+      if (subtitleCues.length === 0) { subtitleBox.style.visibility = 'hidden'; return; }
+      const t = video.currentTime;
+      const cue = subtitleCues.find(c => t >= c.start && t <= c.end);
+      if (cue) {
+        subtitleBox.textContent = cue.text;
+        subtitleBox.style.visibility = 'visible';
+      } else {
+        subtitleBox.style.visibility = 'hidden';
+      }
+    }
+
+    setInterval(updateSubtitles, 100);
+
+    function clearSubtitles() {
+      subtitleCues = [];
+      subtitleBox.style.visibility = 'hidden';
+      subtitleBox.textContent = '';
+    }
+
+    async function loadSubtitleFromUrl(url, mimeType) {
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) { console.error('[subtitles] fetch failed', resp.status); return; }
+        const text = await resp.text();
+        const isVtt = mimeType === 'text/vtt' || url.toLowerCase().includes('.vtt');
+        subtitleCues = isVtt ? parseVtt(text) : parseSrt(text);
+        console.log('[subtitles] loaded', subtitleCues.length, 'cues');
+      } catch (e) {
+        console.error('[subtitles] load error', e);
+      }
+    }
+
+    context.addCustomMessageListener(SUBTITLE_NAMESPACE, (customEvent) => {
+      try {
+        const msg = typeof customEvent.data === 'string'
+          ? JSON.parse(customEvent.data)
+          : customEvent.data;
+        if (msg.action === 'load' && msg.url) {
+          loadSubtitleFromUrl(msg.url, msg.mimeType || '');
+        } else if (msg.action === 'clear') {
+          clearSubtitles();
+        }
+      } catch (e) {
+        console.error('[subtitles] message parse error', e);
+      }
+    });
 
     context.start({ touchScreenOptimizedApp: false });
   </script>
