@@ -3,30 +3,204 @@
 <head>
   <meta charset="utf-8">
   <title>Canalen</title>
-  <!--
-    Cast Application Framework v3 (Web Receiver SDK).
-    Must be loaded before any cast.framework usage.
-  -->
   <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
+    body { background: #000; overflow: hidden; width: 100vw; height: 100vh; font-family: 'Google Sans', sans-serif; color: #fff; }
     #player { width: 100%; height: 100%; object-fit: contain; }
+
+    /* ── Now Playing overlay ─────────────────────────────────────── */
+    #now-playing {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      padding: 32px 48px;
+      background: linear-gradient(transparent, rgba(0,0,0,0.85));
+      display: flex;
+      align-items: flex-end;
+      gap: 24px;
+      opacity: 0;
+      transition: opacity 0.4s ease;
+      pointer-events: none;
+    }
+    #now-playing.visible { opacity: 1; }
+
+    #artwork {
+      width: 80px;
+      height: 80px;
+      border-radius: 8px;
+      object-fit: cover;
+      flex-shrink: 0;
+      background: #1a1a1a;
+      display: none;
+    }
+    #artwork.visible { display: block; }
+
+    #meta { display: flex; flex-direction: column; gap: 4px; }
+    #title { font-size: 28px; font-weight: 600; text-shadow: 0 1px 4px rgba(0,0,0,0.8); }
+    #subtitle-text { font-size: 18px; color: rgba(255,255,255,0.7); }
+
+    #live-badge {
+      display: none;
+      background: #e53935;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      align-self: flex-start;
+      margin-top: 4px;
+    }
+    #live-badge.visible { display: inline-block; }
+
+    /* ── Buffering spinner ───────────────────────────────────────── */
+    #buffering {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+    #buffering.visible { display: flex; }
+    .spinner {
+      width: 56px; height: 56px;
+      border: 4px solid rgba(255,255,255,0.2);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #buffering-label { font-size: 16px; color: rgba(255,255,255,0.7); }
+
+    /* ── Error overlay ───────────────────────────────────────────── */
+    #error-overlay {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.75);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 16px;
+      padding: 32px 48px;
+      text-align: center;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      max-width: 560px;
+    }
+    #error-overlay.visible { display: flex; }
+    #error-icon { font-size: 48px; }
+    #error-title { font-size: 22px; font-weight: 600; }
+    #error-detail { font-size: 15px; color: rgba(255,255,255,0.6); }
   </style>
 </head>
 <body>
   <video id="player" autoplay playsinline></video>
 
+  <!-- Now Playing -->
+  <div id="now-playing">
+    <img id="artwork" alt="">
+    <div id="meta">
+      <div id="title"></div>
+      <div id="subtitle-text"></div>
+      <div id="live-badge">LIVE</div>
+    </div>
+  </div>
+
+  <!-- Buffering -->
+  <div id="buffering">
+    <div class="spinner"></div>
+    <div id="buffering-label">Loading…</div>
+  </div>
+
+  <!-- Error -->
+  <div id="error-overlay">
+    <div id="error-icon">⚠️</div>
+    <div id="error-title">Playback Error</div>
+    <div id="error-detail"></div>
+  </div>
+
   <script>
     'use strict';
 
-    const video   = document.getElementById('player');
-    const context = cast.framework.CastReceiverContext.getInstance();
+    const video         = document.getElementById('player');
+    const nowPlaying    = document.getElementById('now-playing');
+    const artworkEl     = document.getElementById('artwork');
+    const titleEl       = document.getElementById('title');
+    const subtitleEl    = document.getElementById('subtitle-text');
+    const liveBadge     = document.getElementById('live-badge');
+    const bufferingEl   = document.getElementById('buffering');
+    const bufferingLabel= document.getElementById('buffering-label');
+    const errorOverlay  = document.getElementById('error-overlay');
+    const errorDetail   = document.getElementById('error-detail');
+
+    const context       = cast.framework.CastReceiverContext.getInstance();
     const playerManager = context.getPlayerManager();
 
-    // Tell CAF to use our <video> element so PLAY/PAUSE/SEEK commands and
-    // media status reporting continue to work.
     playerManager.setMediaElement(video);
+
+    let hls          = null;
+    let overlayTimer = null;
+
+    // ── UI helpers ────────────────────────────────────────────────
+
+    function showNowPlaying(title, subtitle, artworkUrl, live) {
+      titleEl.textContent    = title    || '';
+      subtitleEl.textContent = subtitle || '';
+      liveBadge.classList.toggle('visible', !!live);
+
+      if (artworkUrl) {
+        artworkEl.src = artworkUrl;
+        artworkEl.classList.add('visible');
+      } else {
+        artworkEl.classList.remove('visible');
+      }
+
+      nowPlaying.classList.add('visible');
+      clearTimeout(overlayTimer);
+      overlayTimer = setTimeout(() => nowPlaying.classList.remove('visible'), 5000);
+    }
+
+    function hideNowPlaying() {
+      nowPlaying.classList.remove('visible');
+      clearTimeout(overlayTimer);
+    }
+
+    function showBuffering(label) {
+      bufferingLabel.textContent = label || 'Loading…';
+      bufferingEl.classList.add('visible');
+      errorOverlay.classList.remove('visible');
+    }
+
+    function hideBuffering() {
+      bufferingEl.classList.remove('visible');
+    }
+
+    function showError(detail) {
+      hideBuffering();
+      hideNowPlaying();
+      errorOverlay.classList.add('visible');
+      errorDetail.textContent = detail || 'An unknown error occurred.';
+    }
+
+    function hideError() {
+      errorOverlay.classList.remove('visible');
+    }
+
+    // ── Video element events ──────────────────────────────────────
+
+    video.addEventListener('waiting',  () => showBuffering('Buffering…'));
+    video.addEventListener('playing',  () => { hideBuffering(); hideError(); });
+    video.addEventListener('stalled',  () => showBuffering('Reconnecting…'));
+    video.addEventListener('error',    () => {
+      const code = video.error ? video.error.code : '?';
+      showError('Video error (code ' + code + '). Try playing again from your phone.');
+    });
+
+    // ── HLS helpers ───────────────────────────────────────────────
 
     function isHlsUrl(url, contentType) {
       if (!url) return false;
@@ -35,25 +209,71 @@
       return ct === 'application/x-mpegurl' || ct === 'application/vnd.apple.mpegurl';
     }
 
-    // Intercept LOAD requests from the sender app.
+    function teardownHls() {
+      if (hls) { hls.destroy(); hls = null; }
+    }
+
+    function loadMedia(url, contentType) {
+      hideError();
+      showBuffering('Loading…');
+      teardownHls();
+      video.src = '';
+      video.load();
+
+      if (isHlsUrl(url, contentType) && Hls.isSupported()) {
+        hls = new Hls({
+          enableWorker: false,
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 10,
+        });
+        hls.on(Hls.Events.ERROR, function (event, data) {
+          if (data.fatal) {
+            console.error('[hls.js] fatal error', data.type, data.details);
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                showBuffering('Reconnecting…');
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                showBuffering('Recovering…');
+                hls.recoverMediaError();
+                break;
+              default:
+                teardownHls();
+                showError('Stream error: ' + data.details + '. Try playing again from your phone.');
+                break;
+            }
+          }
+        });
+        hls.loadSource(url);
+        hls.attachMedia(video);
+      } else {
+        video.src = url;
+      }
+
+      video.play().catch(err => console.warn('[player] autoplay blocked:', err));
+    }
+
+    // ── LOAD interceptor ──────────────────────────────────────────
+
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
       request => {
-        const media = request.media;
-        const url   = media.contentUrl || media.contentId;
-        console.log('[receiver] LOAD url=' + url + ' contentType=' + media.contentType);
+        const media    = request.media;
+        const url      = media.contentUrl || media.contentId;
+        const metadata = media.metadata || {};
 
-        if (isHlsUrl(url, media.contentType)) {
-          // HLS (live channels, catch-up): CAF v3's built-in MPL handles HLS
-          // natively via MSE — no external library needed. Just return the
-          // request and CAF will take care of it.
-          return request;
-        }
+        const isLive   = media.streamType === cast.framework.messages.StreamType.LIVE
+                      || isHlsUrl(url, media.contentType);
+        const title    = metadata.title    || '';
+        const subtitle = metadata.subtitle || '';
+        const artwork  = (metadata.images && metadata.images[0]) ? metadata.images[0].url : null;
 
-        // Non-HLS formats (MKV, MP4, TS, etc.): set src directly.
-        // Chromecast Ultra / 4K hardware decoders handle MKV/HEVC natively.
-        video.src = url;
-        video.play().catch(err => console.warn('[player] autoplay blocked:', err));
+        console.log('[receiver] LOAD url=' + url + ' live=' + isLive + ' title=' + title);
+
+        loadMedia(url, media.contentType);
+        showNowPlaying(title, subtitle, artwork, isLive);
+
         return request;
       }
     );
