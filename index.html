@@ -142,10 +142,8 @@
 
     playerManager.setMediaElement(video);
 
-    let hls              = null;
-    let overlayTimer     = null;
-    let codecCheckTimer  = null;
-    let blackScreenRetry = false;
+    let hls          = null;
+    let overlayTimer = null;
 
     // ── UI helpers ────────────────────────────────────────────────
 
@@ -198,34 +196,18 @@
     video.addEventListener('playing',  () => {
       hideBuffering();
       hideError();
-      // Detect black screen: audio plays but video decoder hasn't produced a frame.
-      // This happens when casting mid-video and the browser lands between keyframes —
-      // seeking back 5 s is enough to hit a nearby keyframe and restart the decoder
-      // without losing the viewer's position.
-      clearTimeout(codecCheckTimer);
-      codecCheckTimer = setTimeout(() => {
+      // Detect audio-only playback: videoWidth stays 0 if the video codec is not
+      // supported (common with H.265/HEVC on older Chromecast models).
+      setTimeout(() => {
         if (!video.paused && video.videoWidth === 0 && video.duration !== 0) {
-          if (!blackScreenRetry) {
-            blackScreenRetry = true;
-            const pos = video.currentTime;
-            console.log('[receiver] black screen at ' + pos + 's, seeking back 5 s to recover');
-            video.currentTime = Math.max(0, pos - 5);
-            // Re-check after another 3 s — if still black, it's a genuine codec issue
-            codecCheckTimer = setTimeout(() => {
-              if (!video.paused && video.videoWidth === 0) {
-                showError('Video codec not supported on this device (likely H.265/HEVC).');
-              }
-            }, 3000);
-          }
+          showError('This video uses a codec not supported by this device (likely H.265/HEVC). It cannot be cast.');
         }
       }, 2000);
     });
     video.addEventListener('stalled',  () => showBuffering('Reconnecting…'));
     video.addEventListener('error', () => {
-      // Ignore errors fired during reset (video.src = '' triggers MEDIA_ERR_SRC_NOT_SUPPORTED)
-      if (!video.currentSrc) return;
-      const code = video.error ? video.error.code : '?';
-      showError('Video error (code ' + code + '). Try playing again from your phone.');
+      if (!video.currentSrc) return; // ignore errors from reset (video.src = '')
+      showError('This video could not be played on this device. Try a different title or play it directly on your phone.');
     });
 
     // ── HLS helpers ───────────────────────────────────────────────
@@ -244,8 +226,6 @@
     function loadMedia(url, contentType) {
       hideError();
       showBuffering('Loading…');
-      clearTimeout(codecCheckTimer);
-      blackScreenRetry = false;
       teardownHls();
       video.src = '';
       video.load();
