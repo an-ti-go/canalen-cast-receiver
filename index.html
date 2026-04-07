@@ -142,8 +142,10 @@
 
     playerManager.setMediaElement(video);
 
-    let hls          = null;
-    let overlayTimer = null;
+    let hls              = null;
+    let overlayTimer     = null;
+    let codecCheckTimer  = null;
+    let blackScreenRetry = false;
 
     // ── UI helpers ────────────────────────────────────────────────
 
@@ -193,7 +195,29 @@
     // ── Video element events ──────────────────────────────────────
 
     video.addEventListener('waiting',  () => showBuffering('Buffering…'));
-    video.addEventListener('playing',  () => { hideBuffering(); hideError(); });
+    video.addEventListener('playing',  () => {
+      hideBuffering();
+      hideError();
+      // Detect black screen: audio plays but video decoder hasn't produced a frame.
+      // First occurrence: seek to 0 to force re-initialization (fixes intermittent race).
+      // If it still fails after the retry, show a codec error.
+      clearTimeout(codecCheckTimer);
+      codecCheckTimer = setTimeout(() => {
+        if (!video.paused && video.videoWidth === 0 && video.duration !== 0) {
+          if (!blackScreenRetry) {
+            blackScreenRetry = true;
+            console.log('[receiver] black screen detected, seeking to 0 to recover');
+            video.currentTime = 0;
+            // Re-check after another 3 s
+            codecCheckTimer = setTimeout(() => {
+              if (!video.paused && video.videoWidth === 0) {
+                showError('Video codec not supported on this device (likely H.265/HEVC).');
+              }
+            }, 3000);
+          }
+        }
+      }, 2000);
+    });
     video.addEventListener('stalled',  () => showBuffering('Reconnecting…'));
     video.addEventListener('error', () => {
       // Ignore errors fired during reset (video.src = '' triggers MEDIA_ERR_SRC_NOT_SUPPORTED)
@@ -218,6 +242,8 @@
     function loadMedia(url, contentType) {
       hideError();
       showBuffering('Loading…');
+      clearTimeout(codecCheckTimer);
+      blackScreenRetry = false;
       teardownHls();
       video.src = '';
       video.load();
