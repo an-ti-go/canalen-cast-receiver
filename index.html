@@ -199,16 +199,18 @@
       hideBuffering();
       hideError();
       // Detect black screen: audio plays but video decoder hasn't produced a frame.
-      // First occurrence: seek to 0 to force re-initialization (fixes intermittent race).
-      // If it still fails after the retry, show a codec error.
+      // This happens when casting mid-video and the browser lands between keyframes —
+      // seeking back 5 s is enough to hit a nearby keyframe and restart the decoder
+      // without losing the viewer's position.
       clearTimeout(codecCheckTimer);
       codecCheckTimer = setTimeout(() => {
         if (!video.paused && video.videoWidth === 0 && video.duration !== 0) {
           if (!blackScreenRetry) {
             blackScreenRetry = true;
-            console.log('[receiver] black screen detected, seeking to 0 to recover');
-            video.currentTime = 0;
-            // Re-check after another 3 s
+            const pos = video.currentTime;
+            console.log('[receiver] black screen at ' + pos + 's, seeking back 5 s to recover');
+            video.currentTime = Math.max(0, pos - 5);
+            // Re-check after another 3 s — if still black, it's a genuine codec issue
             codecCheckTimer = setTimeout(() => {
               if (!video.paused && video.videoWidth === 0) {
                 showError('Video codec not supported on this device (likely H.265/HEVC).');
